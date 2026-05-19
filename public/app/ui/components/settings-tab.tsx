@@ -2,6 +2,16 @@ import type { Dispatch, SetStateAction } from "react";
 import type { SettingsResponse } from "../types";
 import { Input, Switch } from "@heroui/react";
 
+type SwitchValue = boolean | { target?: { checked?: boolean } };
+type BooleanSettingKey = "autoRefresh" | "outThink" | "simpleModelMap";
+
+function selectedSwitchValue(value: SwitchValue) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return value.target?.checked ?? false;
+}
+
 export function SettingsTab({
   settings,
   savingSettings,
@@ -36,6 +46,10 @@ export function SettingsTab({
     settings?.outThink ?? false,
     settings?.simpleModelMap ?? false,
   ].filter(Boolean).length;
+  const setBooleanSetting = (key: BooleanSettingKey, value: SwitchValue) => {
+    const selected = selectedSwitchValue(value);
+    setSettings((current) => (current ? { ...current, [key]: selected } : current));
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -86,7 +100,7 @@ export function SettingsTab({
                     <div className="flex flex-col items-end gap-3">
                       <Switch
                         isSelected={settings?.autoRefresh ?? false}
-                        onChange={(value) => setSettings((c) => (c ? { ...c, autoRefresh: value } : c))}
+                        onChange={(value) => setBooleanSetting("autoRefresh", value)}
                       >
                         <Switch.Control>
                           <Switch.Thumb />
@@ -117,7 +131,7 @@ export function SettingsTab({
                     <div className="flex flex-col items-end gap-3">
                       <Switch
                         isSelected={settings?.outThink ?? false}
-                        onChange={(value) => setSettings((c) => (c ? { ...c, outThink: value } : c))}
+                        onChange={(value) => setBooleanSetting("outThink", value)}
                       >
                         <Switch.Control>
                           <Switch.Thumb />
@@ -144,7 +158,7 @@ export function SettingsTab({
                     <div className="flex flex-col items-end gap-3">
                       <Switch
                         isSelected={settings?.simpleModelMap ?? false}
-                        onChange={(value) => setSettings((c) => (c ? { ...c, simpleModelMap: value } : c))}
+                        onChange={(value) => setBooleanSetting("simpleModelMap", value)}
                       >
                         <Switch.Control>
                           <Switch.Thumb />

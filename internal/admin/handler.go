@@ -429,6 +429,20 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, h.modelsResponse(models))
+}
+
+func (h *Handler) HandleRefreshModels(w http.ResponseWriter, r *http.Request) {
+	models, err := h.openai.RefreshModelVariants(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, h.modelsResponse(models))
+}
+
+func (h *Handler) modelsResponse(models []map[string]any) map[string]any {
 	usageByModel := h.metrics.ModelUsageSnapshot()
 	result := make([]map[string]any, 0, len(models))
 	for _, item := range models {
@@ -449,10 +463,10 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		result = append(result, enriched)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"object": "list",
 		"data":   result,
-	})
+	}
 }
 
 func boolToInt(v bool) int {

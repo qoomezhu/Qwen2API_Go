@@ -408,8 +408,16 @@ type stsTokenResponse struct {
 }
 
 func (c *Client) ListModels(ctx context.Context, token string) ([]Model, error) {
+	return c.listModels(ctx, token, false)
+}
+
+func (c *Client) RefreshModels(ctx context.Context, token string) ([]Model, error) {
+	return c.listModels(ctx, token, true)
+}
+
+func (c *Client) listModels(ctx context.Context, token string, force bool) ([]Model, error) {
 	c.modelsMu.RLock()
-	if len(c.models) > 0 && time.Since(c.modelsAt) < 5*time.Minute {
+	if !force && len(c.models) > 0 && time.Since(c.modelsAt) < 5*time.Minute {
 		cached := append([]Model(nil), c.models...)
 		c.modelsMu.RUnlock()
 		return cached, nil

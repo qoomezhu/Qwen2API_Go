@@ -8,3 +8,6 @@ data
 /data.json
 /docs
 *.py
+*.log
+
+test

@@ -245,6 +245,52 @@ func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 	}
 }
 
+func TestRefreshModelsBypassesCachedList(t *testing.T) {
+	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	calls := 0
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/api/models" {
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			calls++
+			body := `{"data":[{"id":"first","name":"First"}]}`
+			if calls == 2 {
+				body = `{"data":[{"id":"second","name":"Second"}]}`
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	models, err := client.ListModels(context.Background(), "token-123")
+	if err != nil {
+		t.Fatalf("ListModels() error = %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "first" {
+		t.Fatalf("first models = %#v, want first", models)
+	}
+
+	cached, err := client.ListModels(context.Background(), "token-123")
+	if err != nil {
+		t.Fatalf("cached ListModels() error = %v", err)
+	}
+	if len(cached) != 1 || cached[0].ID != "first" || calls != 1 {
+		t.Fatalf("cached models = %#v calls=%d, want first with one call", cached, calls)
+	}
+
+	refreshed, err := client.RefreshModels(context.Background(), "token-123")
+	if err != nil {
+		t.Fatalf("RefreshModels() error = %v", err)
+	}
+	if len(refreshed) != 1 || refreshed[0].ID != "second" || calls != 2 {
+		t.Fatalf("refreshed models = %#v calls=%d, want second with two calls", refreshed, calls)
+	}
+}
+
 func TestEnsureGuestCookieHeaderUsesAuthPyBootstrapSequence(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
 

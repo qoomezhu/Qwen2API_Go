@@ -820,12 +820,25 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListModelVariants(ctx context.Context) ([]map[string]any, error) {
+	return h.listModelVariants(ctx, false)
+}
+
+func (h *Handler) RefreshModelVariants(ctx context.Context) ([]map[string]any, error) {
+	return h.listModelVariants(ctx, true)
+}
+
+func (h *Handler) listModelVariants(ctx context.Context, force bool) ([]map[string]any, error) {
 	session, err := h.accounts.GetAccountSession()
 	if err != nil {
 		return nil, err
 	}
 
-	models, err := h.qwen.ListModels(ctx, session.Token)
+	var models []qwen.Model
+	if force {
+		models, err = h.qwen.RefreshModels(ctx, session.Token)
+	} else {
+		models, err = h.qwen.ListModels(ctx, session.Token)
+	}
 	if err != nil {
 		h.accounts.RecordFailure(session.Email)
 		return nil, err

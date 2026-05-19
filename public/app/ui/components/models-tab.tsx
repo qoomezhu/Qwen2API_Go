@@ -1,4 +1,5 @@
 import { Input } from "@heroui/react";
+import { RefreshCw } from "lucide-react";
 import type { ModelItem } from "../types";
 import { formatCompactNumber } from "./dashboard-charts";
 import { SectionTitle } from "./primitives";
@@ -7,10 +8,14 @@ export function ModelsTab({
   models,
   keyword,
   setKeyword,
+  refreshingModels,
+  refreshModels,
 }: {
   models: ModelItem[];
   keyword: string;
   setKeyword: (value: string) => void;
+  refreshingModels: boolean;
+  refreshModels: () => Promise<void>;
 }) {
   const activeModels = models.filter((model) => (model.usage?.totalTokens || 0) > 0).length;
   const totals = models.reduce(
@@ -29,7 +34,20 @@ export function ModelsTab({
         <SectionTitle
           title="模型能力矩阵"
           description="读取后台受保护 /api/models，查看模型变体能力与累计输入/输出 Token"
-          action={<Input placeholder="搜索模型" value={keyword} onChange={(e) => setKeyword(e.target.value)} className="w-64" />}
+          action={
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Input placeholder="搜索模型" value={keyword} onChange={(e) => setKeyword(e.target.value)} className="w-64" />
+              <button
+                className="admin-btn admin-btn-primary"
+                disabled={refreshingModels}
+                onClick={() => void refreshModels()}
+                title="从上游重新拉取模型列表"
+              >
+                <RefreshCw size={16} className={refreshingModels ? "animate-spin" : ""} />
+                刷新模型
+              </button>
+            </div>
+          }
         />
       </div>
       <div className="admin-card-body">

@@ -74,6 +74,7 @@ export function useAdminConsole(initialTab?: TabKey) {
   const [addKeyValue, setAddKeyValue] = useState("");
   const [thresholdHours, setThresholdHours] = useState("24");
   const [savingSettings, setSavingSettings] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab || "overview");
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialTheme);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -321,6 +322,7 @@ export function useAdminConsole(initialTab?: TabKey) {
       addKeyValue,
       thresholdHours,
       savingSettings,
+      refreshingModels,
       activeTab,
       themeMode,
       sidebarCollapsed,
@@ -406,6 +408,20 @@ export function useAdminConsole(initialTab?: TabKey) {
         await submitAction("/api/reload-runtime-config", {});
         setToast({ type: "success", message: "已重新加载 .env，运行配置已热更新。" });
         await loadShell();
+      },
+      refreshModels: async () => {
+        try {
+          setRefreshingModels(true);
+          const response = await submitAction<ModelsResponse>("/api/refresh-models", {});
+          if (response) {
+            setModels(response.data || []);
+          }
+          setToast({ type: "success", message: "模型列表已从上游刷新。" });
+        } catch (error) {
+          setToast({ type: "error", message: error instanceof Error ? error.message : "刷新模型列表失败" });
+        } finally {
+          setRefreshingModels(false);
+        }
       },
       addRegularKey: async () => {
         await submitAction("/api/addRegularKey", { apiKey: addKeyValue });

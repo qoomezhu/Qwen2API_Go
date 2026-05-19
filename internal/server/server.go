@@ -100,6 +100,7 @@ func New(cfg config.Config, keyring *auth.Keyring, openAIHandler *openai.Handler
 
 	handle("/api/dashboard/overview", "admin", ensureMethod(http.MethodGet, withAdminKey(adminHandler.HandleOverview)))
 	handle("/api/models", "admin", ensureMethod(http.MethodGet, withAdminKey(adminHandler.HandleModels)))
+	handle("/api/refresh-models", "admin", ensureMethod(http.MethodPost, withAdminKey(adminHandler.HandleRefreshModels)))
 	handle("/api/settings", "admin", ensureMethod(http.MethodGet, withAdminKey(adminHandler.HandleSettings)))
 	handle("/api/prompts", "admin", withAdminKey(adminHandler.HandlePromptsAPI))
 	handle("/api/prompts/reset", "admin", ensureMethod(http.MethodPost, withAdminKey(adminHandler.HandleResetPrompts)))

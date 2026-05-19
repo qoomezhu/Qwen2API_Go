@@ -257,7 +257,13 @@ export function AdminDashboard({ initialTab }: { initialTab?: TabKey } = {}) {
           ) : null}
 
           {state.activeTab === "models" ? (
-            <ModelsTab models={state.filteredModels} keyword={state.modelKeyword} setKeyword={actions.setModelKeyword} />
+            <ModelsTab
+              models={state.filteredModels}
+              keyword={state.modelKeyword}
+              setKeyword={actions.setModelKeyword}
+              refreshingModels={state.refreshingModels}
+              refreshModels={actions.refreshModels}
+            />
           ) : null}
 
           {state.activeTab === "uploads" ? <UploadsTab apiKey={state.apiKey} /> : null}
