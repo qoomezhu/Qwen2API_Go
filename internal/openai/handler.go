@@ -3,6 +3,7 @@ package openai
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -453,15 +454,14 @@ func buildChatRequestBody(session storage.Account, model, chatID, chatType strin
 	}
 	return map[string]any{
 		"stream":             true,
+		"version":            "2.1",
 		"incremental_output": true,
 		"chat_id":            chatID,
-		"chat_type":          chatType,
-		"model":              model,
-		"messages":           messages,
-		"session_id":         fmt.Sprintf("%d", time.Now().UnixNano()),
-		"id":                 fmt.Sprintf("%d", time.Now().UnixNano()),
-		"sub_chat_type":      chatType,
 		"chat_mode":          "normal",
+		"model":              model,
+		"parent_id":          nil,
+		"messages":           decorateChatMessages(model, chatType, messages, false),
+		"timestamp":          time.Now().Unix(),
 	}
 }
 
@@ -492,45 +492,24 @@ func buildGuestChatRequestBody(model, chatID, chatType string, messages []map[st
 		"chat_mode":          "guest",
 		"model":              model,
 		"parent_id":          nil,
-		"messages":           decorateGuestMessages(model, chatType, messages),
+		"messages":           decorateChatMessages(model, chatType, messages, true),
 		"timestamp":          time.Now().Unix(),
 	}
 }
 
 func decorateGuestMessages(model, chatType string, messages []map[string]any) []map[string]any {
+	return decorateChatMessages(model, chatType, messages, true)
+}
+
+func decorateChatMessages(model, chatType string, messages []map[string]any, autoThinking bool) []map[string]any {
 	decorated := make([]map[string]any, 0, len(messages))
 	messageTimestamp := time.Now().Unix()
 	for _, message := range messages {
 		item := cloneMap(message)
-		if _, ok := item["fid"]; !ok || strings.TrimSpace(fmt.Sprint(item["fid"])) == "" || fmt.Sprint(item["fid"]) == "<nil>" {
-			item["fid"] = fmt.Sprintf("%d", time.Now().UnixNano())
-		}
-		if _, ok := item["parentId"]; !ok {
-			item["parentId"] = nil
-		}
-		if _, ok := item["childrenIds"]; !ok {
-			item["childrenIds"] = []string{}
-		}
-		if _, ok := item["user_action"]; !ok || strings.TrimSpace(fmt.Sprint(item["user_action"])) == "" || fmt.Sprint(item["user_action"]) == "<nil>" {
-			item["user_action"] = "chat"
-		}
-		if _, ok := item["files"]; !ok {
-			item["files"] = []any{}
-		}
-		if _, ok := item["timestamp"]; !ok {
-			item["timestamp"] = messageTimestamp
-		}
-		if _, ok := item["models"]; !ok {
-			item["models"] = []string{model}
-		}
-		item["chat_type"] = chatType
-		item["sub_chat_type"] = chatType
-		if _, ok := item["parent_id"]; !ok {
-			item["parent_id"] = nil
-		}
+		applyQwenMessageEnvelope(item, model, chatType, messageTimestamp)
 
 		featureConfig, _ := item["feature_config"].(map[string]any)
-		item["feature_config"] = normalizeGuestFeatureConfig(featureConfig)
+		item["feature_config"] = normalizeChatFeatureConfig(featureConfig, autoThinking)
 
 		extra, _ := item["extra"].(map[string]any)
 		if extra == nil {
@@ -554,48 +533,88 @@ func decorateAssetMessages(model, chatType string, messages []map[string]any) []
 	messageTimestamp := time.Now().Unix()
 	for _, message := range messages {
 		item := cloneMap(message)
-		if _, ok := item["fid"]; !ok || strings.TrimSpace(fmt.Sprint(item["fid"])) == "" || fmt.Sprint(item["fid"]) == "<nil>" {
-			item["fid"] = fmt.Sprintf("%d", time.Now().UnixNano())
-		}
-		if _, ok := item["parentId"]; !ok {
-			item["parentId"] = nil
-		}
-		if _, ok := item["childrenIds"]; !ok {
-			item["childrenIds"] = []string{}
-		}
-		if _, ok := item["user_action"]; !ok || strings.TrimSpace(fmt.Sprint(item["user_action"])) == "" || fmt.Sprint(item["user_action"]) == "<nil>" {
-			item["user_action"] = "chat"
-		}
-		if _, ok := item["files"]; !ok {
-			item["files"] = []any{}
-		}
-		if _, ok := item["timestamp"]; !ok {
-			item["timestamp"] = messageTimestamp
-		}
-		if _, ok := item["models"]; !ok {
-			item["models"] = []string{model}
-		}
-		item["chat_type"] = chatType
-		item["sub_chat_type"] = chatType
-		if _, ok := item["parent_id"]; !ok {
-			item["parent_id"] = nil
-		}
+		applyQwenMessageEnvelope(item, model, chatType, messageTimestamp)
 		decorated = append(decorated, item)
 	}
 	return decorated
 }
 
+func applyQwenMessageEnvelope(item map[string]any, model, chatType string, timestamp int64) {
+	if _, ok := item["fid"]; !ok || !looksLikeUUID(fmt.Sprint(item["fid"])) {
+		item["fid"] = newUUID()
+	}
+	if _, ok := item["parentId"]; !ok {
+		item["parentId"] = nil
+	}
+	if !hasChildrenIDs(item["childrenIds"]) {
+		item["childrenIds"] = []string{newUUID()}
+	}
+	if _, ok := item["user_action"]; !ok || strings.TrimSpace(fmt.Sprint(item["user_action"])) == "" || fmt.Sprint(item["user_action"]) == "<nil>" {
+		item["user_action"] = "chat"
+	}
+	if _, ok := item["files"]; !ok {
+		item["files"] = []any{}
+	}
+	if _, ok := item["timestamp"]; !ok {
+		item["timestamp"] = timestamp
+	}
+	if _, ok := item["models"]; !ok {
+		item["models"] = []string{model}
+	}
+	item["chat_type"] = chatType
+	item["sub_chat_type"] = chatType
+	if _, ok := item["parent_id"]; !ok {
+		item["parent_id"] = nil
+	}
+}
+
+func hasChildrenIDs(value any) bool {
+	switch v := value.(type) {
+	case []string:
+		return len(v) > 0 && strings.TrimSpace(v[0]) != ""
+	case []any:
+		return len(v) > 0 && strings.TrimSpace(fmt.Sprint(v[0])) != ""
+	default:
+		return false
+	}
+}
+
+func looksLikeUUID(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) == 36 &&
+		value[8] == '-' &&
+		value[13] == '-' &&
+		value[18] == '-' &&
+		value[23] == '-'
+}
+
+func newUUID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+}
+
 func normalizeGuestFeatureConfig(featureConfig map[string]any) map[string]any {
+	return normalizeChatFeatureConfig(featureConfig, true)
+}
+
+func normalizeChatFeatureConfig(featureConfig map[string]any, autoThinking bool) map[string]any {
 	if featureConfig == nil {
 		featureConfig = map[string]any{}
 	}
-	featureConfig["thinking_enabled"] = true
 	featureConfig["output_schema"] = "phase"
 	featureConfig["research_mode"] = "normal"
-	featureConfig["auto_thinking"] = true
-	featureConfig["thinking_mode"] = "Auto"
 	featureConfig["thinking_format"] = "summary"
 	featureConfig["auto_search"] = true
+	if autoThinking {
+		featureConfig["thinking_enabled"] = true
+		featureConfig["auto_thinking"] = true
+		featureConfig["thinking_mode"] = "Auto"
+	}
 	return featureConfig
 }
 

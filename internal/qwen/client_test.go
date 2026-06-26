@@ -17,6 +17,10 @@ import (
 
 func TestNewRequestSetsAuthHeadersAndCookie(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	client.guestAuth = guestAuthState{
+		cookieHeader: "cna=guest-cna; qwen-locale=zh-CN; atpsida=seeded",
+		refreshedAt:  time.Now(),
+	}
 
 	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/models", "token-123", nil)
 	if err != nil {
@@ -30,6 +34,11 @@ func TestNewRequestSetsAuthHeadersAndCookie(t *testing.T) {
 	if !strings.Contains(cookie, "token=token-123") {
 		t.Fatalf("expected token cookie, got %q", cookie)
 	}
+	for _, key := range []string{"cna=guest-cna", "qwen-locale=zh-CN", "atpsida=seeded", "_bl_uid=", "tfstk=", "isg="} {
+		if !strings.Contains(cookie, key) {
+			t.Fatalf("expected auth cookie to include %q, got %q", key, cookie)
+		}
+	}
 	if !strings.Contains(cookie, "ssxmod_itna=") || !strings.Contains(cookie, "ssxmod_itna2=") {
 		t.Fatalf("expected ssxmod cookies, got %q", cookie)
 	}
@@ -41,6 +50,8 @@ func TestNewRequestSetsAuthHeadersAndCookie(t *testing.T) {
 		"sec-ch-ua-bitness",
 		"Priority",
 		"DNT",
+		"sec-gpc",
+		"X-Request-Id",
 	} {
 		if req.Header.Get(header) == "" {
 			t.Fatalf("expected %s to be set", header)
@@ -126,7 +137,7 @@ func TestNewRequestUsesGuestCookieWithoutAuthorization(t *testing.T) {
 		refreshedAt:  time.Now(),
 	}
 
-	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/models", "", nil)
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v2/models/", "", nil)
 	if err != nil {
 		t.Fatalf("newRequest() error = %v", err)
 	}
@@ -141,8 +152,8 @@ func TestNewRequestUsesGuestCookieWithoutAuthorization(t *testing.T) {
 	if strings.Contains(cookie, "token=") {
 		t.Fatalf("did not expect token cookie in guest request, got %q", cookie)
 	}
-	if got := req.Header.Get("Version"); got != "0.2.45" {
-		t.Fatalf("Version = %q, want %q", got, "0.2.45")
+	if got := req.Header.Get("Version"); got != qwenWebVersion {
+		t.Fatalf("Version = %q, want %q", got, qwenWebVersion)
 	}
 	if got := req.Header.Get("bx-v"); got != "2.5.36" {
 		t.Fatalf("bx-v = %q, want %q", got, "2.5.36")
@@ -201,7 +212,7 @@ func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader("{}")),
 					Header:     make(http.Header),
 				}, nil
-			case "/api/models":
+			case "/api/v2/models/":
 				targetCalls++
 				cookie := req.Header.Get("Cookie")
 				if targetCalls == 1 {
@@ -219,7 +230,7 @@ func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 				}
 				return &http.Response{
 					StatusCode: 200,
-					Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+					Body:       io.NopCloser(strings.NewReader(`{"success":true,"data":{"data":[]}}`)),
 					Header:     make(http.Header),
 				}, nil
 			default:
@@ -229,7 +240,7 @@ func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 		}),
 	}
 
-	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/models", "", nil)
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v2/models/", "", nil)
 	if err != nil {
 		t.Fatalf("newRequest() error = %v", err)
 	}
@@ -247,16 +258,17 @@ func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 
 func TestRefreshModelsBypassesCachedList(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
 	calls := 0
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.Path != "/api/models" {
+			if req.URL.Path != "/api/v2/models/" {
 				t.Fatalf("unexpected path: %s", req.URL.Path)
 			}
 			calls++
-			body := `{"data":[{"id":"first","name":"First"}]}`
+			body := `{"success":true,"data":{"data":[{"id":"first","name":"First"}]}}`
 			if calls == 2 {
-				body = `{"data":[{"id":"second","name":"Second"}]}`
+				body = `{"success":true,"data":{"data":[{"id":"second","name":"Second"}]}}`
 			}
 			return &http.Response{
 				StatusCode: 200,
@@ -307,8 +319,8 @@ func TestEnsureGuestCookieHeaderUsesAuthPyBootstrapSequence(t *testing.T) {
 				if got := req.Header.Get("Accept"); got != "application/json, text/plain, */*" {
 					t.Fatalf("%s Accept = %q", req.URL.Path, got)
 				}
-				if got := req.Header.Get("Version"); got != "0.2.45" {
-					t.Fatalf("%s Version = %q, want 0.2.45", req.URL.Path, got)
+				if got := req.Header.Get("Version"); got != qwenWebVersion {
+					t.Fatalf("%s Version = %q, want %s", req.URL.Path, got, qwenWebVersion)
 				}
 				if got := req.Header.Get("Source"); got != "web" {
 					t.Fatalf("%s Source = %q, want web", req.URL.Path, got)
@@ -335,8 +347,8 @@ func TestEnsureGuestCookieHeaderUsesAuthPyBootstrapSequence(t *testing.T) {
 				if got := strings.TrimSpace(anyString(typarms["project_id"])); got != "" {
 					t.Fatalf("project_id = %q, want empty string", got)
 				}
-				if got := strings.TrimSpace(anyString(typarms["cdn_version"])); got != "0.2.45" {
-					t.Fatalf("cdn_version = %q, want %q", got, "0.2.45")
+				if got := strings.TrimSpace(anyString(typarms["cdn_version"])); got != qwenWebVersion {
+					t.Fatalf("cdn_version = %q, want %q", got, qwenWebVersion)
 				}
 			default:
 				t.Fatalf("unexpected path: %s", req.URL.Path)
@@ -402,6 +414,7 @@ func TestEnsureGuestCookieHeaderFallsBackWhenBootstrapFails(t *testing.T) {
 func TestNewChatSendsRequestedChatType(t *testing.T) {
 	var capturedBody map[string]any
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Path != "/api/v2/chats/new" {
@@ -432,13 +445,20 @@ func TestNewChatSendsRequestedChatType(t *testing.T) {
 	if got := strings.TrimSpace(anyString(capturedBody["chat_type"])); got != "t2t" {
 		t.Fatalf("chat_type = %q, want %q", got, "t2t")
 	}
-	if got := strings.TrimSpace(anyString(capturedBody["chat_mode"])); got != "local" {
-		t.Fatalf("chat_mode = %q, want %q", got, "local")
+	if got := strings.TrimSpace(anyString(capturedBody["chat_mode"])); got != "normal" {
+		t.Fatalf("chat_mode = %q, want %q", got, "normal")
+	}
+	if got := strings.TrimSpace(anyString(capturedBody["project_id"])); got != "" {
+		t.Fatalf("project_id = %q, want empty string", got)
+	}
+	if got := strings.TrimSpace(anyString(capturedBody["title"])); got != "新建对话" {
+		t.Fatalf("title = %q, want 新建对话", got)
 	}
 }
 
 func TestNewChatParsesAlternateChatIDShape(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -455,6 +475,34 @@ func TestNewChatParsesAlternateChatIDShape(t *testing.T) {
 	}
 	if chatID != "chat-alt" {
 		t.Fatalf("chatID = %q, want %q", chatID, "chat-alt")
+	}
+}
+
+func TestNewChatMapsAlibabaHumanVerificationHTMLTo429(t *testing.T) {
+	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`<html><title>Access Verification</title><script>var aliyun_waf_aa = true; var aliyunCaptcha = true;</script></html>`)),
+				Header: http.Header{
+					"Content-Type": []string{"text/html; charset=utf-8"},
+				},
+			}, nil
+		}),
+	}
+
+	_, err := client.NewChat(context.Background(), "token-123", "qwen3", "t2t")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	upstreamErr, ok := err.(*UpstreamError)
+	if !ok {
+		t.Fatalf("error type = %T, want *UpstreamError", err)
+	}
+	if upstreamErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", upstreamErr.StatusCode)
 	}
 }
 
@@ -548,11 +596,11 @@ func TestChatCompletionsUsesGuestHeadersWithoutToken(t *testing.T) {
 	if got := captured.Header.Get("Referer"); got != "https://chat.qwen.ai/c/guest" {
 		t.Fatalf("Referer = %q, want %q", got, "https://chat.qwen.ai/c/guest")
 	}
-	if got := captured.Header.Get("Version"); got != "0.2.45" {
-		t.Fatalf("Version = %q, want %q", got, "0.2.45")
+	if got := captured.Header.Get("Version"); got != qwenWebVersion {
+		t.Fatalf("Version = %q, want %q", got, qwenWebVersion)
 	}
-	if got := captured.Header.Get("bx-v"); got != "2.5.36" {
-		t.Fatalf("bx-v = %q, want %q", got, "2.5.36")
+	if got := captured.Header.Get("bx-v"); got != qwenBxVersion {
+		t.Fatalf("bx-v = %q, want %q", got, qwenBxVersion)
 	}
 	if got := captured.Header.Get("X-Request-Id"); got == "" {
 		t.Fatal("expected X-Request-Id to be set")
@@ -567,6 +615,7 @@ func TestChatCompletionsUsesGuestHeadersWithoutToken(t *testing.T) {
 
 func TestChatCompletionsUsesJSONAcceptWhenStreamFalse(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
 
 	var captured *http.Request
 	client.httpClient = &http.Client{
@@ -592,10 +641,14 @@ func TestChatCompletionsUsesJSONAcceptWhenStreamFalse(t *testing.T) {
 	if got := captured.Header.Get("Accept"); got != "application/json" {
 		t.Fatalf("Accept = %q, want application/json", got)
 	}
+	if got := captured.Header.Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want no", got)
+	}
 }
 
 func TestChatCompletionsMapsAlibabaHumanVerificationTo429(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	seedGuestAuth(client)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -625,6 +678,13 @@ func TestChatCompletionsMapsAlibabaHumanVerificationTo429(t *testing.T) {
 func anyString(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func seedGuestAuth(client *Client) {
+	client.guestAuth = guestAuthState{
+		cookieHeader: "cna=guest-cna; qwen-locale=zh-CN; atpsida=seeded",
+		refreshedAt:  time.Now(),
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

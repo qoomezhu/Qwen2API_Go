@@ -65,7 +65,7 @@ func TestBuildChatRequestBodyForGuestMatchesGuestProtocolShape(t *testing.T) {
 	}
 }
 
-func TestBuildChatRequestBodyForRegularAccountKeepsLegacyProtocol(t *testing.T) {
+func TestBuildChatRequestBodyForRegularAccountMatchesQwenWebProtocol(t *testing.T) {
 	session := storage.Account{Email: "user@example.com", Token: "token-123"}
 	body := buildChatRequestBody(session, "qwen3.6-plus", "chat-123", "t2t", []map[string]any{
 		{"role": "user", "content": "你好"},
@@ -74,13 +74,36 @@ func TestBuildChatRequestBodyForRegularAccountKeepsLegacyProtocol(t *testing.T) 
 	if got := body["chat_mode"]; got != "normal" {
 		t.Fatalf("chat_mode = %v, want normal", got)
 	}
-	if _, exists := body["version"]; exists {
-		t.Fatalf("did not expect version in regular body")
+	if got := body["version"]; got != "2.1" {
+		t.Fatalf("version = %v, want 2.1", got)
 	}
-	if _, exists := body["session_id"]; !exists {
-		t.Fatalf("expected session_id in regular body")
+	if _, exists := body["session_id"]; exists {
+		t.Fatalf("did not expect session_id in regular body")
 	}
-	if _, exists := body["id"]; !exists {
-		t.Fatalf("expected id in regular body")
+	if _, exists := body["id"]; exists {
+		t.Fatalf("did not expect id in regular body")
+	}
+	if body["parent_id"] != nil {
+		t.Fatalf("parent_id = %v, want nil", body["parent_id"])
+	}
+
+	messages, ok := body["messages"].([]map[string]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v", body["messages"])
+	}
+	message := messages[0]
+	if message["user_action"] != "chat" {
+		t.Fatalf("user_action = %v, want chat", message["user_action"])
+	}
+	if message["sub_chat_type"] != "t2t" {
+		t.Fatalf("sub_chat_type = %v, want t2t", message["sub_chat_type"])
+	}
+	fid, _ := message["fid"].(string)
+	if !looksLikeUUID(fid) {
+		t.Fatalf("fid = %q, want UUID", fid)
+	}
+	childrenIDs, _ := message["childrenIds"].([]string)
+	if len(childrenIDs) != 1 || !looksLikeUUID(childrenIDs[0]) {
+		t.Fatalf("childrenIds = %#v, want one UUID", message["childrenIds"])
 	}
 }

@@ -99,8 +99,8 @@ func (c *Client) fetchAnonymousCookieHeader(ctx context.Context) (string, error)
 		"Accept-Language":             []string{fp.AcceptLanguage},
 		"Accept-Encoding":             []string{fp.AcceptEncoding},
 		"Connection":                  []string{"keep-alive"},
-		"Version":                     []string{"0.2.45"},
-		"bx-v":                        []string{"2.5.36"},
+		"Version":                     []string{qwenWebVersion},
+		"bx-v":                        []string{qwenBxVersion},
 		"Source":                      []string{"web"},
 		"Timezone":                    []string{fp.Timezone},
 		"sec-ch-ua":                   []string{fp.SecChUA},
@@ -176,7 +176,7 @@ func (c *Client) guestBootstrapRequests(browserHeaders, apiHeaders http.Header) 
 			"channel_type":   "",
 			"community_type": "",
 			"from_id":        "",
-			"cdn_version":    "0.2.45",
+			"cdn_version":    qwenWebVersion,
 			"spmId":          "a2ty_o01.29997169",
 			"aemPageId":      "//" + domain + "/",
 			"domain":         domain,
@@ -304,12 +304,16 @@ func formatCookieMap(cookies map[string]string) string {
 		return ""
 	}
 	preferred := []string{
+		"token",
 		"cna",
 		"xlly_s",
 		"sca",
 		"x-ap",
 		"qwen-theme",
 		"qwen-locale",
+		"aui",
+		"cnaui",
+		"acw_tc",
 		"atpsida",
 		"_bl_uid",
 		"isg",
@@ -346,6 +350,28 @@ func formatCookieMap(cookies map[string]string) string {
 		parts = append(parts, key+"="+value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func mergeCookieHeader(cookies map[string]string, header string) {
+	if cookies == nil {
+		return
+	}
+	for _, part := range strings.Split(header, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		cookies[name] = value
+	}
 }
 
 func randomAlphaNumeric(length int) string {

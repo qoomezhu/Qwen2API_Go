@@ -26,6 +26,11 @@ import (
 	"qwen2api/internal/ssxmod"
 )
 
+const (
+	qwenWebVersion = "0.2.67"
+	qwenBxVersion  = "2.5.36"
+)
+
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -36,6 +41,10 @@ type Client struct {
 	ssxmod     *ssxmod.Manager
 	guestMu    sync.RWMutex
 	guestAuth  guestAuthState
+}
+
+type cookieOptions struct {
+	includeGuestBootstrap bool
 }
 
 func NewClient(cfg config.Config, logger *logging.Logger) *Client {
@@ -123,16 +132,18 @@ func (c *Client) newRequestWithOptions(ctx context.Context, method, path string,
 	req.Header.Set("Pragma", fingerprint.Pragma)
 	req.Header.Set("Priority", fingerprint.Priority)
 	req.Header.Set("DNT", fingerprint.DNT)
+	req.Header.Set("sec-gpc", "1")
 	req.Header.Set("source", "web")
 	req.Header.Set("X-Request-Timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	req.Header.Set("X-Request-Id", newRequestID())
 
 	if rawToken == "" {
-		req.Header.Set("Version", "0.2.45")
-		req.Header.Set("bx-v", "2.5.36")
+		req.Header.Set("Version", qwenWebVersion)
+		req.Header.Set("bx-v", qwenBxVersion)
 		req.Header.Set("X-Accel-Buffering", "no")
 	} else {
-		req.Header.Set("Version", "0.1.13")
-		req.Header.Set("bx-v", "2.5.31")
+		req.Header.Set("Version", qwenWebVersion)
+		req.Header.Set("bx-v", qwenBxVersion)
 	}
 	if options.IncludeAuth && rawToken != "" {
 		req.Header.Set("Authorization", "Bearer "+rawToken)
@@ -143,7 +154,9 @@ func (c *Client) newRequestWithOptions(ctx context.Context, method, path string,
 			req.Header.Add(key, value)
 		}
 	}
-	cookieHeader, err := c.buildCookieHeader(ctx, rawToken)
+	cookieHeader, err := c.buildCookieHeader(ctx, rawToken, cookieOptions{
+		includeGuestBootstrap: options.IncludeAuth,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -152,29 +165,29 @@ func (c *Client) newRequestWithOptions(ctx context.Context, method, path string,
 	return req, nil
 }
 
-func (c *Client) buildCookieHeader(ctx context.Context, token string) (string, error) {
-	ssxmodITNA, ssxmodITNA2 := c.ssxmod.Get()
-	parts := make([]string, 0, 3)
-	if strings.TrimSpace(token) != "" {
-		parts = append(parts, "token="+strings.TrimSpace(token))
-	} else {
+func (c *Client) buildCookieHeader(ctx context.Context, token string, options cookieOptions) (string, error) {
+	cookies := make(map[string]string)
+	rawToken := strings.TrimSpace(token)
+
+	if options.includeGuestBootstrap {
 		guestCookie, err := c.EnsureGuestCookieHeader(ctx)
 		if err != nil {
 			return "", err
 		}
-		if strings.TrimSpace(guestCookie) != "" {
-			parts = append(parts, guestCookie)
-		}
+		mergeCookieHeader(cookies, guestCookie)
 	}
-	currentCookies := strings.Join(parts, "; ")
-	if strings.TrimSpace(ssxmodITNA) != "" && !strings.Contains(currentCookies, "ssxmod_itna=") {
-		parts = append(parts, "ssxmod_itna="+ssxmodITNA)
+	fillGuestCookieDefaults(cookies)
+	ssxmodITNA, ssxmodITNA2 := c.ssxmod.Get()
+	if strings.TrimSpace(ssxmodITNA) != "" {
+		cookies["ssxmod_itna"] = ssxmodITNA
 	}
-	currentCookies = strings.Join(parts, "; ")
-	if strings.TrimSpace(ssxmodITNA2) != "" && !strings.Contains(currentCookies, "ssxmod_itna2=") {
-		parts = append(parts, "ssxmod_itna2="+ssxmodITNA2)
+	if strings.TrimSpace(ssxmodITNA2) != "" {
+		cookies["ssxmod_itna2"] = ssxmodITNA2
 	}
-	return strings.Join(parts, "; "), nil
+	if rawToken != "" {
+		cookies["token"] = rawToken
+	}
+	return formatCookieMap(cookies), nil
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
@@ -266,7 +279,9 @@ func (c *Client) cloneRequestWithRefreshedGuestCookie(req *http.Request) (*http.
 		cloned.GetBody = req.GetBody
 	}
 
-	cookieHeader, err := c.buildCookieHeader(req.Context(), "")
+	cookieHeader, err := c.buildCookieHeader(req.Context(), "", cookieOptions{
+		includeGuestBootstrap: true,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +439,11 @@ func (c *Client) listModels(ctx context.Context, token string, force bool) ([]Mo
 	}
 	c.modelsMu.RUnlock()
 
-	req, err := c.newRequest(ctx, http.MethodGet, "/api/models", token, nil)
+	req, err := c.newRequestWithOptions(ctx, http.MethodGet, "/api/v2/models/", token, nil, RequestOptions{
+		Accept:      "application/json, text/plain, */*",
+		ContentType: "",
+		IncludeAuth: true,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -434,19 +453,18 @@ func (c *Client) listModels(ctx context.Context, token string, force bool) ([]Mo
 	}
 	defer resp.Body.Close()
 
-	var payload struct {
-		Data []Model `json:"data"`
-	}
+	var payload map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, err
 	}
+	models := extractModelsFromPayload(payload)
 
 	c.modelsMu.Lock()
-	c.models = append([]Model(nil), payload.Data...)
+	c.models = append([]Model(nil), models...)
 	c.modelsAt = time.Now()
 	c.modelsMu.Unlock()
 
-	return append([]Model(nil), payload.Data...), nil
+	return append([]Model(nil), models...), nil
 }
 
 func (c *Client) NewChat(ctx context.Context, token, model, chatType string) (string, error) {
@@ -454,26 +472,24 @@ func (c *Client) NewChat(ctx context.Context, token, model, chatType string) (st
 	if chatType == "" {
 		chatType = "t2t"
 	}
-	chatMode := "local"
+	chatMode := "normal"
 	body := map[string]any{
-		"title":     "New Chat",
-		"models":    []string{model},
-		"chat_mode": chatMode,
-		"chat_type": chatType,
-		"timestamp": time.Now().UnixMilli(),
+		"title":      "新建对话",
+		"models":     []string{model},
+		"chat_mode":  chatMode,
+		"chat_type":  chatType,
+		"timestamp":  time.Now().UnixMilli(),
+		"project_id": "",
 	}
 	requestOptions := RequestOptions{
-		Accept:      "application/json",
+		Accept:      "application/json, text/plain, */*",
 		ContentType: "application/json",
 		IncludeAuth: true,
+		Referer:     c.baseURL + "/c/new-chat",
 	}
 	if strings.TrimSpace(normalizeBearerToken(token)) == "" {
 		chatMode = "guest"
-		body["title"] = "新建对话"
 		body["chat_mode"] = chatMode
-		body["project_id"] = ""
-		requestOptions.Accept = "application/json, text/plain, */*"
-		requestOptions.Referer = c.baseURL + "/c/new-chat"
 		requestOptions.Headers = http.Header{
 			"X-Request-Id": []string{newRequestID()},
 		}
@@ -489,9 +505,21 @@ func (c *Client) NewChat(ctx context.Context, token, model, chatType string) (st
 	}
 	defer resp.Body.Close()
 
+	rawBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return "", readErr
+	}
+	textBody := strings.TrimSpace(string(rawBody))
+
+	c.logger.DebugModule("UPSTREAM", "new chat full body status=%d content_type=%s body=%s",
+		resp.StatusCode, resp.Header.Get("Content-Type"), textBody)
+	if isAlibabaHumanVerification(textBody) {
+		return "", newAlibabaHumanVerificationError()
+	}
+
 	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
+	if err := json.Unmarshal(rawBody, &payload); err != nil {
+		return "", fmt.Errorf("生成 chat_id 失败: %s", textBody)
 	}
 	if upstreamErr := NormalizeUpstreamError(payload); upstreamErr != nil {
 		return "", upstreamErr
@@ -504,23 +532,18 @@ func (c *Client) NewChat(ctx context.Context, token, model, chatType string) (st
 }
 
 func (c *Client) ChatCompletions(ctx context.Context, token, chatID string, body map[string]any) (*http.Response, error) {
-	accept := "text/event-stream"
 	requestOptions := RequestOptions{
-		Accept:      accept,
+		Accept:      "application/json",
 		ContentType: "application/json",
 		IncludeAuth: true,
-	}
-	if stream, ok := body["stream"].(bool); ok && !stream {
-		accept = "application/json"
-		requestOptions.Accept = accept
+		Referer:     c.baseURL + "/c/" + url.PathEscape(chatID),
+		Headers: http.Header{
+			"X-Accel-Buffering": []string{"no"},
+		},
 	}
 	if strings.TrimSpace(normalizeBearerToken(token)) == "" {
-		accept = "application/json"
-		requestOptions.Accept = accept
 		requestOptions.Referer = c.baseURL + "/c/guest"
-		requestOptions.Headers = http.Header{
-			"X-Request-Id": []string{newRequestID()},
-		}
+		requestOptions.Headers.Set("X-Request-Id", newRequestID())
 	}
 	req, err := c.newRequestWithOptions(ctx, http.MethodPost, "/api/v2/chat/completions?chat_id="+url.QueryEscape(chatID), token, body, requestOptions)
 	if err != nil {
@@ -718,6 +741,31 @@ func simpleFileType(contentType string) string {
 	default:
 		return "file"
 	}
+}
+
+func extractModelsFromPayload(payload any) []Model {
+	switch v := payload.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		if models := extractModelsFromPayload(v["data"]); len(models) > 0 {
+			return models
+		}
+	case []any:
+		models := make([]Model, 0, len(v))
+		for _, item := range v {
+			raw, err := json.Marshal(item)
+			if err != nil {
+				continue
+			}
+			var model Model
+			if err := json.Unmarshal(raw, &model); err == nil && strings.TrimSpace(model.ID) != "" {
+				models = append(models, model)
+			}
+		}
+		return models
+	}
+	return nil
 }
 
 func extractChatIDFromPayload(payload any) string {
