@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"qwen2api/internal/config"
 	"qwen2api/internal/logging"
@@ -14,7 +15,8 @@ import (
 )
 
 type stubAccountStore struct {
-	accounts []storage.Account
+	accounts        []storage.Account
+	browserSessions map[string]storage.BrowserSession
 }
 
 func (s *stubAccountStore) LoadAccounts() ([]storage.Account, error) {
@@ -40,6 +42,22 @@ func (s *stubAccountStore) DeleteAccount(email string) error {
 
 func (s *stubAccountStore) SaveAllAccounts(accounts []storage.Account) error {
 	s.accounts = append([]storage.Account(nil), accounts...)
+	return nil
+}
+
+func (s *stubAccountStore) LoadBrowserSessions() (map[string]storage.BrowserSession, error) {
+	sessions := make(map[string]storage.BrowserSession, len(s.browserSessions))
+	for kind, session := range s.browserSessions {
+		sessions[kind] = session
+	}
+	return sessions, nil
+}
+
+func (s *stubAccountStore) SaveBrowserSessions(sessions map[string]storage.BrowserSession) error {
+	s.browserSessions = make(map[string]storage.BrowserSession, len(sessions))
+	for kind, session := range sessions {
+		s.browserSessions[kind] = session
+	}
 	return nil
 }
 
@@ -116,5 +134,40 @@ func TestGuestFallbackYieldsToRealAccountsAndReturnsAfterDelete(t *testing.T) {
 	accounts = service.Accounts()
 	if len(accounts) != 1 || !accounts[0].IsGuest() {
 		t.Fatalf("expected guest fallback after delete, got %#v", accounts)
+	}
+}
+
+func TestInitializeRestoresPersistedBrowserSession(t *testing.T) {
+	server := newGuestBootstrapServer()
+	defer server.Close()
+
+	store := &stubAccountStore{
+		browserSessions: map[string]storage.BrowserSession{
+			"guest": {
+				Headers: map[string][]string{
+					"User-Agent":      {"Persisted Browser"},
+					"Accept-Language": {"en-US,en;q=0.9"},
+				},
+				Cookie:     "cna=persisted-cna; sca=persisted-sca",
+				CapturedAt: time.Now(),
+				Guest:      true,
+				HasCookie:  true,
+			},
+		},
+	}
+	client := qwen.NewClient(config.Config{QwenChatProxyURL: server.URL}, logging.New(false))
+	service := NewService(config.Config{DataSaveMode: "file"}, config.NewRuntime(config.Config{}), store, client, logging.New(false))
+
+	if err := service.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	snapshot := service.BrowserSessionSnapshot()
+	guest, _ := snapshot["guest"].(map[string]any)
+	if captured, _ := guest["captured"].(bool); !captured {
+		t.Fatalf("expected restored guest browser session, got %#v", snapshot)
+	}
+	if hasCookie, _ := guest["hasCookie"].(bool); !hasCookie {
+		t.Fatalf("expected restored guest cookie state, got %#v", guest)
 	}
 }

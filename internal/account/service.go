@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +87,11 @@ func (s *Service) Initialize(ctx context.Context) error {
 		s.logger.ErrorModule("ACCOUNT", "account initialize load failed: %v", err)
 		return err
 	}
+	if sessions, err := s.store.LoadBrowserSessions(); err == nil {
+		s.client.RestoreBrowserSessions(browserSessionsFromStorage(sessions))
+	} else if !isReadonlyStoreError(err) {
+		s.logger.WarnModule("ACCOUNT", "加载浏览器会话失败: %v", err)
+	}
 	if s.logger.IsDebug() {
 		s.logger.DebugModule("ACCOUNT", "account initialize loaded total=%d", len(accounts))
 	}
@@ -94,6 +101,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 		normalized, ok := s.ensureAccountReady(ctx, account)
 		if ok {
 			validated = append(validated, normalized)
+			s.refreshBrowserSessionForAccount(ctx, normalized)
 		}
 	}
 	if len(validated) == 0 {
@@ -261,10 +269,11 @@ func (s *Service) ListAccounts() []storage.Account {
 	return s.Accounts()
 }
 
-func (s *Service) AddAccount(ctx context.Context, email, password string) error {
+func (s *Service) AddAccount(ctx context.Context, email, password string, cookieHeader ...string) error {
 	if strings.TrimSpace(email) == "" || strings.TrimSpace(password) == "" {
 		return errors.New("邮箱和密码不能为空")
 	}
+	cookie := optionalCookie(cookieHeader)
 
 	s.mu.RLock()
 	for _, account := range s.accounts {
@@ -283,14 +292,25 @@ func (s *Service) AddAccount(ctx context.Context, email, password string) error 
 	if err != nil {
 		return err
 	}
-	return s.AddAccountWithToken(email, password, token, exp)
+	if err := s.AddAccountWithToken(email, password, token, exp, cookie); err != nil {
+		return err
+	}
+	s.refreshBrowserSessionForAccount(ctx, storage.Account{
+		Email:    email,
+		Password: password,
+		Token:    token,
+		Cookie:   cookie,
+		Expires:  exp,
+	})
+	return nil
 }
 
-func (s *Service) AddAccountWithToken(email, password, token string, expires int64) error {
+func (s *Service) AddAccountWithToken(email, password, token string, expires int64, cookieHeader ...string) error {
 	account := storage.Account{
 		Email:    email,
 		Password: password,
 		Token:    token,
+		Cookie:   optionalCookie(cookieHeader),
 		Expires:  expires,
 	}
 
@@ -353,32 +373,73 @@ func (s *Service) DeleteAccount(email string) error {
 
 func (s *Service) RefreshAccount(ctx context.Context, email string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var refreshed storage.Account
 	for i, account := range s.accounts {
 		if !strings.EqualFold(account.Email, email) {
 			continue
 		}
 		if account.IsGuest() {
 			if _, err := s.client.RefreshGuestCookieHeader(ctx); err != nil {
+				s.mu.Unlock()
 				return err
 			}
+			s.saveBrowserSessions()
 			s.failures[email] = 0
+			s.mu.Unlock()
 			return nil
 		}
 		token, err := s.tokenMgr.Login(ctx, account.Email, account.Password)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		exp, err := decodeExpiry(token)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		s.accounts[i].Token = token
 		s.accounts[i].Expires = exp
 		s.failures[email] = 0
-		return s.store.SaveAccount(s.accounts[i])
+		refreshed = s.accounts[i]
+		if err := s.store.SaveAccount(refreshed); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+		s.refreshBrowserSessionForAccount(ctx, refreshed)
+		return nil
 	}
+	s.mu.Unlock()
 	return errors.New("账号不存在")
+}
+
+func (s *Service) CaptureGuestBrowserSession(ctx context.Context) (*qwen.BrowserSession, error) {
+	session, err := s.client.CaptureGuestBrowserSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.saveBrowserSessions()
+	return session, nil
+}
+
+func (s *Service) CaptureBrowserSessionWithCookie(ctx context.Context, cookieHeader string) (*qwen.BrowserSession, error) {
+	session, err := s.client.CaptureBrowserSessionWithCookie(ctx, cookieHeader)
+	if err != nil {
+		return nil, err
+	}
+	s.saveBrowserSessions()
+	return session, nil
+}
+
+func (s *Service) BrowserSessionSnapshot() map[string]any {
+	return s.client.BrowserSessionSnapshot()
+}
+
+func (s *Service) saveBrowserSessions() {
+	if err := s.store.SaveBrowserSessions(browserSessionsToStorage(s.client.BrowserSessions())); err != nil && !isReadonlyStoreError(err) {
+		s.logger.WarnModule("ACCOUNT", "保存浏览器会话失败: %v", err)
+	}
 }
 
 func (s *Service) RefreshAllAccounts(ctx context.Context, thresholdHours int) (int, error) {
@@ -523,16 +584,107 @@ func (s *Service) roundRobinLocked() storage.Account {
 }
 
 func (s *Service) RecordFailure(email string) {
+	s.RecordFailureAndRefresh(context.Background(), email)
+}
+
+func (s *Service) RecordFailureAndRefresh(ctx context.Context, email string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.failures[email]++
 	s.lastUsed[email] = time.Now()
+	account, ok := s.accountByEmailLocked(email)
+	s.mu.Unlock()
+	if ok {
+		s.refreshBrowserSessionForAccount(ctx, account)
+	}
 }
 
 func (s *Service) ResetFailure(email string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failures[email] = 0
+}
+
+func (s *Service) accountByEmailLocked(email string) (storage.Account, bool) {
+	for _, account := range s.accounts {
+		if strings.EqualFold(account.Email, email) {
+			return account, true
+		}
+	}
+	return storage.Account{}, false
+}
+
+func (s *Service) refreshBrowserSessionForAccount(ctx context.Context, account storage.Account) {
+	if !s.client.BrowserAuthEnabled() {
+		return
+	}
+	if account.IsGuest() {
+		if _, err := s.client.CaptureGuestBrowserSession(ctx); err != nil {
+			s.logger.WarnModule("ACCOUNT", "游客浏览器会话采集失败: %v", err)
+			return
+		}
+		s.saveBrowserSessions()
+		return
+	}
+	cookieHeader := accountBrowserCookieHeader(account)
+	if strings.TrimSpace(cookieHeader) == "" {
+		return
+	}
+	if _, err := s.client.CaptureBrowserSessionForAccount(ctx, account.BrowserSessionKey(), cookieHeader); err != nil {
+		s.logger.WarnModule("ACCOUNT", "账号浏览器会话采集失败 email=%s err=%v", account.Email, err)
+		return
+	}
+	s.saveBrowserSessions()
+}
+
+func accountBrowserCookieHeader(account storage.Account) string {
+	cookies := map[string]string{}
+	mergeAccountCookieHeader(cookies, account.Cookie)
+	token := strings.TrimSpace(account.Token)
+	if token != "" {
+		cookies["token"] = token
+	}
+	return formatAccountCookieMap(cookies)
+}
+
+func optionalCookie(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
+}
+
+func mergeAccountCookieHeader(cookies map[string]string, header string) {
+	for _, part := range strings.Split(header, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		cookies[name] = value
+	}
+}
+
+func formatAccountCookieMap(cookies map[string]string) string {
+	if len(cookies) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cookies))
+	for name, value := range cookies {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+"="+cookies[name])
+	}
+	return strings.Join(parts, "; ")
 }
 
 func remainingHours(expires int64) float64 {
@@ -577,6 +729,62 @@ func RuntimeForAccount(account storage.Account) RuntimeState {
 		RemainingHours: hours,
 		ExpiresAt:      expAt.UTC().Format(time.RFC3339),
 	}
+}
+
+func browserSessionsToStorage(sessions map[string]qwen.BrowserSession) map[string]storage.BrowserSession {
+	result := make(map[string]storage.BrowserSession, len(sessions))
+	for kind, session := range sessions {
+		result[kind] = storage.BrowserSession{
+			Headers:     headerToStorage(session.Headers),
+			Cookie:      session.Cookie,
+			CapturedAt:  session.CapturedAt,
+			Guest:       session.Guest,
+			SourceURL:   session.SourceURL,
+			UserAgent:   session.UserAgent,
+			HasCookie:   session.HasCookie,
+			CookieNames: append([]string(nil), session.CookieNames...),
+		}
+	}
+	return result
+}
+
+func browserSessionsFromStorage(sessions map[string]storage.BrowserSession) map[string]qwen.BrowserSession {
+	result := make(map[string]qwen.BrowserSession, len(sessions))
+	for kind, session := range sessions {
+		result[kind] = qwen.BrowserSession{
+			Headers:     headerFromStorage(session.Headers),
+			Cookie:      session.Cookie,
+			CapturedAt:  session.CapturedAt,
+			Guest:       session.Guest,
+			SourceURL:   session.SourceURL,
+			UserAgent:   session.UserAgent,
+			HasCookie:   session.HasCookie,
+			CookieNames: append([]string(nil), session.CookieNames...),
+		}
+	}
+	return result
+}
+
+func headerToStorage(headers http.Header) map[string][]string {
+	if len(headers) == 0 {
+		return map[string][]string{}
+	}
+	result := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		result[key] = append([]string(nil), values...)
+	}
+	return result
+}
+
+func headerFromStorage(headers map[string][]string) http.Header {
+	if len(headers) == 0 {
+		return http.Header{}
+	}
+	result := make(http.Header, len(headers))
+	for key, values := range headers {
+		result[key] = append([]string(nil), values...)
+	}
+	return result
 }
 
 func (s *Service) BuildHealthStats() HealthStats {

@@ -163,6 +163,145 @@ func TestNewRequestUsesGuestCookieWithoutAuthorization(t *testing.T) {
 	}
 }
 
+func TestNewRequestPrefersCapturedBrowserSessionHeaders(t *testing.T) {
+	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	client.browserSessions.guest = &BrowserSession{
+		Headers: http.Header{
+			"User-Agent":               []string{"Mozilla/5.0 Browser Capture"},
+			"Accept-Language":          []string{"en-US,en;q=0.9"},
+			"Bx-Ua":                    []string{"captured-bx-ua"},
+			"Sec-Fetch-Site":           []string{"same-origin"},
+			"sec-ch-ua":                []string{`"Chromium";v="147", "Not.A/Brand";v="8"`},
+			"sec-fetch-storage-access": []string{"active"},
+			"If-None-Match":            []string{`W/"captured-etag"`},
+			"sec-gpc":                  []string{"1"},
+			"Referer":                  []string{"https://chat.qwen.ai/c/captured"},
+		},
+		Cookie:     "cna=captured-cna; sca=captured-sca",
+		CapturedAt: time.Now(),
+		Guest:      true,
+	}
+	client.guestAuth = guestAuthState{
+		cookieHeader: "cna=guest-cna; qwen-locale=zh-CN",
+		refreshedAt:  time.Now(),
+	}
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v2/models/", "", nil)
+	if err != nil {
+		t.Fatalf("newRequest() error = %v", err)
+	}
+
+	if got := req.Header.Get("User-Agent"); got != "Mozilla/5.0 Browser Capture" {
+		t.Fatalf("User-Agent = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("Accept-Language"); got != "en-US,en;q=0.9" {
+		t.Fatalf("Accept-Language = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("Referer"); got != "https://chat.qwen.ai/c/captured" {
+		t.Fatalf("Referer = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("Bx-Ua"); got != "captured-bx-ua" {
+		t.Fatalf("Bx-Ua = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("Sec-Fetch-Site"); got != "same-origin" {
+		t.Fatalf("Sec-Fetch-Site = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("sec-fetch-storage-access"); got != "active" {
+		t.Fatalf("sec-fetch-storage-access = %q, want browser captured value", got)
+	}
+	if got := req.Header.Get("If-None-Match"); got != `W/"captured-etag"` {
+		t.Fatalf("If-None-Match = %q, want browser captured value", got)
+	}
+	cookie := req.Header.Get("Cookie")
+	for _, part := range []string{"cna=captured-cna", "sca=captured-sca"} {
+		if !strings.Contains(cookie, part) {
+			t.Fatalf("Cookie = %q, expected %q", cookie, part)
+		}
+	}
+}
+
+func TestRestoreBrowserSessionsFeedsProtocolRequests(t *testing.T) {
+	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	client.RestoreBrowserSessions(map[string]BrowserSession{
+		"guest": {
+			Headers: http.Header{
+				"User-Agent":      []string{"Persisted Browser"},
+				"Accept-Language": []string{"en-US,en;q=0.9"},
+			},
+			Cookie:     "cna=persisted-cna; sca=persisted-sca",
+			CapturedAt: time.Now(),
+			Guest:      true,
+			HasCookie:  true,
+		},
+	})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v2/models/", "", nil)
+	if err != nil {
+		t.Fatalf("newRequest() error = %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "Persisted Browser" {
+		t.Fatalf("User-Agent = %q, want persisted browser header", got)
+	}
+	cookie := req.Header.Get("Cookie")
+	for _, part := range []string{"cna=persisted-cna", "sca=persisted-sca"} {
+		if !strings.Contains(cookie, part) {
+			t.Fatalf("Cookie = %q, expected %q", cookie, part)
+		}
+	}
+}
+
+func TestNewRequestUsesAccountScopedBrowserSessions(t *testing.T) {
+	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
+	client.RestoreBrowserSessions(map[string]BrowserSession{
+		"user-a@example.com": {
+			Headers: http.Header{
+				"User-Agent": []string{"Browser A"},
+				"Bx-Ua":      []string{"bx-a"},
+			},
+			Cookie:     "cna=cookie-a; sca=sca-a",
+			CapturedAt: time.Now(),
+			HasCookie:  true,
+		},
+		"user-b@example.com": {
+			Headers: http.Header{
+				"User-Agent": []string{"Browser B"},
+				"Bx-Ua":      []string{"bx-b"},
+			},
+			Cookie:     "cna=cookie-b; sca=sca-b",
+			CapturedAt: time.Now(),
+			HasCookie:  true,
+		},
+	})
+
+	reqA, err := client.newRequest(WithAccountKey(context.Background(), "user-a@example.com"), http.MethodGet, "/api/v2/models/", "token-a", nil)
+	if err != nil {
+		t.Fatalf("newRequest(account a) error = %v", err)
+	}
+	reqB, err := client.newRequest(WithAccountKey(context.Background(), "user-b@example.com"), http.MethodGet, "/api/v2/models/", "token-b", nil)
+	if err != nil {
+		t.Fatalf("newRequest(account b) error = %v", err)
+	}
+
+	if got := reqA.Header.Get("User-Agent"); got != "Browser A" {
+		t.Fatalf("account a User-Agent = %q, want Browser A", got)
+	}
+	if got := reqB.Header.Get("User-Agent"); got != "Browser B" {
+		t.Fatalf("account b User-Agent = %q, want Browser B", got)
+	}
+	if got := reqA.Header.Get("Bx-Ua"); got != "bx-a" {
+		t.Fatalf("account a Bx-Ua = %q, want bx-a", got)
+	}
+	if got := reqB.Header.Get("Bx-Ua"); got != "bx-b" {
+		t.Fatalf("account b Bx-Ua = %q, want bx-b", got)
+	}
+	if cookie := reqA.Header.Get("Cookie"); !strings.Contains(cookie, "cna=cookie-a") || strings.Contains(cookie, "cna=cookie-b") {
+		t.Fatalf("account a Cookie = %q, want only account a browser cookie", cookie)
+	}
+	if cookie := reqB.Header.Get("Cookie"); !strings.Contains(cookie, "cna=cookie-b") || strings.Contains(cookie, "cna=cookie-a") {
+		t.Fatalf("account b Cookie = %q, want only account b browser cookie", cookie)
+	}
+}
+
 func TestDoRetriesAnonymousRequestAfterRefreshingGuestCookie(t *testing.T) {
 	client := NewClient(config.Config{QwenChatProxyURL: "https://chat.qwen.ai"}, logging.New(false))
 	client.guestAuth = guestAuthState{

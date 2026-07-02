@@ -61,6 +61,21 @@ func (c *Client) ensureGuestCookieHeader(ctx context.Context, force bool) (strin
 		return c.guestAuth.cookieHeader, nil
 	}
 
+	if c.browserAuth.Enabled {
+		session, err := c.captureBrowserSession(ctx, "", true)
+		if err == nil && strings.TrimSpace(session.Cookie) != "" {
+			c.setBrowserSession(browserSessionGuest, session)
+			c.guestAuth = guestAuthState{
+				cookieHeader: session.Cookie,
+				refreshedAt:  time.Now(),
+			}
+			return session.Cookie, nil
+		}
+		if err != nil && c.logger != nil {
+			c.logger.WarnModule("UPSTREAM", "browser guest cookie capture failed, falling back to HTTP bootstrap err=%v", err)
+		}
+	}
+
 	cookieHeader, err := c.fetchAnonymousCookieHeader(ctx)
 	if err != nil {
 		return "", err
